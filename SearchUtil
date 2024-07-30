@@ -1,0 +1,283 @@
+package au.com.cfs.winged.helpers;
+
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+import javax.jcr.Node;
+import javax.jcr.RepositoryException;
+import javax.jcr.Session;
+
+import au.com.cfs.winged.core.models.SearchModel;
+import org.apache.commons.io.FilenameUtils;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.sling.api.resource.Resource;
+import org.apache.sling.api.resource.ResourceResolver;
+import org.apache.sling.api.resource.ValueMap;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.day.cq.search.PredicateConverter;
+import com.day.cq.search.PredicateGroup;
+import com.day.cq.search.Query;
+import com.day.cq.search.QueryBuilder;
+import com.day.cq.search.result.Hit;
+import com.day.cq.search.result.SearchResult;
+import com.day.cq.tagging.Tag;
+import com.day.cq.wcm.api.Page;
+import com.day.cq.wcm.api.PageManager;
+import com.day.cq.dam.api.Asset;
+
+import au.com.cfs.winged.core.models.pojo.SearchRequest;
+import au.com.cfs.winged.core.models.pojo.SearchResultItem;
+
+public class SearchUtil {
+
+	private static final Logger LOGGER = LoggerFactory.getLogger(SearchUtil.class);
+
+	private static final String REQUEST_PARAM_QUERY = "query";
+	private static final String REQUEST_PARAM_SORTBY = "sortBy";
+	private static final String REQUEST_PARAM_SORTBY_NAME = "name";
+	private static final String REQUEST_PARAM_PAGE = "page";
+	public static final int MAXIMUM_ITEMS_PER_PAGE = 12;
+
+	private static final String PREDICATE_FULLTEXT = "fulltext";
+	private static final String PREDICATE_LAST_MODIFIED = "@cq:lastModified";
+	private static final String PREDICATE_TITLE = "@jcr:title";
+
+
+	private static final String DOCUMENT = "Document";
+	private static final String ARTICLE = "Article";
+	private static final String PAGE = "Page";
+	private static final String JCR_CONTENT = "jcr:content";
+	public static final String DEFAULT_SEARCH_ROOT_PAGE_PATH = "/content/cfs-winged/au/en";
+
+	private static final String SEARCH_NODE_PATH = "/jcr:content/root/responsivegrid/container/search";
+
+	public static Map<String, Object> getSearchResults(SearchRequest request, QueryBuilder queryBuilder, ResourceResolver resourceResolver, String searchPath) {
+
+		Map<String, Object> resultsMap = new HashMap();
+		List<SearchResultItem> results = new ArrayList<>();
+		long totalResult = 0L;
+		long totalResultPage = 0L;
+
+		try {
+			if (request!=null) {
+				final Query query = createResultsQuery(request, queryBuilder, resourceResolver, searchPath);
+				SearchResult searchResult = query.getResult();
+				results = processSearchResults(searchResult, resourceResolver);
+				totalResult = searchResult.getTotalMatches();
+				totalResultPage = totalResult/MAXIMUM_ITEMS_PER_PAGE;
+
+				if (totalResult%MAXIMUM_ITEMS_PER_PAGE != 0) {
+					totalResultPage = totalResultPage +1;
+				}
+			}
+		} catch (Exception ex) {
+			LOGGER.error("\n ERROR in getSearchResults {} ", ex);
+		}
+
+		resultsMap.put("total", totalResult);
+		resultsMap.put("totalPages", totalResultPage);
+		resultsMap.put("results", results);
+
+		return resultsMap;
+
+	}
+
+
+	private static Query createResultsQuery(SearchRequest request, QueryBuilder queryBuilder,ResourceResolver resourceResolver, String searchPath) {
+
+		long resultsOffset = 0;
+
+		String orderby = request.getOrderby();
+		String sort = "desc";
+		if(StringUtils.isBlank(orderby) || orderby.contains("newest")) {
+			orderby = "@jcr:content/cq:lastModified";
+			sort = "desc";
+		}else if (StringUtils.isBlank(orderby) || orderby.contains("oldest")) {
+			orderby = "@jcr:content/cq:lastModified";
+			sort = "asc";
+		}else if (StringUtils.isBlank(orderby) || orderby.contains("name")) {
+			orderby="@jcr:content/jcr:title";
+			sort= "asc";
+		}
+
+		if ( StringUtils.isNotBlank(request.getPage())) {
+			resultsOffset = (Long.parseLong(request.getPage())-1)*MAXIMUM_ITEMS_PER_PAGE;
+		}
+
+		String keyword = request.getQuery();
+
+		Map<String, String> predicatesMap = new HashMap();
+		predicatesMap.put(PREDICATE_FULLTEXT, keyword);
+		predicatesMap.put("group.p.or", "true");
+
+		int index = 1;
+		List<String> searchPathList = new ArrayList<String>();
+		searchPathList = getSearchList(searchPath, resourceResolver);
+
+		for(String path : searchPathList) {
+			if(path != null) {
+				predicatesMap.put("group." + index + "_group.path", path);
+				predicatesMap.put("group." + index + "_group.1_property", "@jcr:content/hideInNav");
+				predicatesMap.put("group." + index + "_group.1_property.operation", "not");
+				predicatesMap.put("group." + index + "_group.1_property.value", "exists");
+
+				if(!isDAMAsset(path) && path.contains("/content")) {
+					predicatesMap.put("group." + index + "_group.type", "cq:Page");
+					predicatesMap.put("group." + index + "_group.2_property", "@jcr:content/jcr:created");
+					predicatesMap.put("group." + index + "_group.2_property.operation", "exists");
+				} else {
+					predicatesMap.put("group." + index + "_group.type", "dam:Asset");
+				}
+
+				index++;
+			}
+		}
+
+
+		if(StringUtils.isNotBlank(orderby) && !orderby.equalsIgnoreCase("relevance")) {
+			predicatesMap.put("orderby", orderby);
+			predicatesMap.put("orderby.sort", sort);
+		}
+
+		PredicateGroup predicates = PredicateConverter.createPredicates(predicatesMap);
+
+		Query query = queryBuilder.createQuery(predicates, resourceResolver.adaptTo(Session.class));
+		query.setHitsPerPage(MAXIMUM_ITEMS_PER_PAGE);
+
+		if(resultsOffset>0) {
+			query.setStart(resultsOffset);
+		}
+		return query;
+	}
+
+	public final static List<String> getSearchList(String configPath, ResourceResolver resourceResolver) {
+		SearchModel model = null;
+		ModelHelper modelHelper = new ModelHelper();
+
+		Resource resource = resourceResolver.getResource(configPath);
+		ValueMap valueMap = resource.adaptTo(ValueMap.class);
+
+		Object searchProperty =valueMap.get("searchPath");
+		List<String> searchPath = new ArrayList<String>();
+		if(searchProperty != null) {
+			if(searchProperty instanceof String){
+				searchPath.add(searchProperty.toString());
+			} else if (searchProperty instanceof String[]) {
+				for(String value : (String[])searchProperty) {
+					searchPath.add(value);
+				}
+			}
+		}
+
+		return searchPath;
+	}
+
+	private static List<SearchResultItem> processSearchResults(SearchResult searchResult, ResourceResolver resourceResolver) {
+		List<SearchResultItem> results = new ArrayList();
+
+		for (final Hit hit : searchResult.getHits()) {
+			try {
+				Resource hitRes = hit.getResource();
+
+				if(isDAMAsset(hitRes.getPath())){
+					String description  = "";
+					Resource assetResource = resourceResolver.getResource(hitRes.getPath());
+					if (assetResource != null) {
+						Resource metadataResource = assetResource.getChild("jcr:content/metadata");
+						if (metadataResource != null) {
+							Node metadataNode = metadataResource.adaptTo(Node.class);
+							if (metadataNode != null && metadataNode.hasProperty("dc:description")) {
+								description = metadataNode.getProperty("dc:description").getString();
+
+							}
+						}
+					}
+
+					List<String> tagsList = new ArrayList<>();
+					tagsList.add(DOCUMENT);
+
+					String fileName = getAssetFileName(assetResource);
+
+					results.add(new SearchResultItem(fileName, assetResource.getPath(),description,"cfs-search | " + assetResource.getName(),tagsList ));
+
+				}else {
+					Page page = getPage(hitRes);
+
+					if (page != null && page.hasChild(JCR_CONTENT)) {
+						List<String> tagsList = new ArrayList<>();
+						Tag[] tagsArray = page.getTags();
+						for (Tag tag : tagsArray) {
+							tagsList.add(tag.getTitle());
+						}
+						if(tagsList.size() == 0 ) {
+							if(page.getPath().contains("/articles") || page.getPath().contains("/news")) {
+								tagsList.add(ARTICLE);
+							}else {
+								tagsList.add(PAGE);
+							}
+
+						}
+						String trackerLocationId = page.getProperties().get("analyticsPageName","cfs-search | " + PageTitleUtil.getNavigationTitle(page));
+
+						results.add(new SearchResultItem(PageTitleUtil.getNavigationTitle(page),
+								LinkUtil.getMappedURL(page.getPath(), resourceResolver), page.getDescription(), trackerLocationId, tagsList));
+					}
+
+				}
+
+			} catch (RepositoryException exception) {
+				LOGGER.error("RepositoryException in processSearchResults {}", exception);
+			} catch (Exception exception) {
+                LOGGER.error("Exception in processSearchResults {}", exception);
+			}
+		}
+
+		return results;
+
+	}
+
+
+	private static Page getPage(Resource resource) {
+
+		if (resource != null) {
+			ResourceResolver resourceResolver = resource.getResourceResolver();
+			PageManager pageManager = (PageManager) resourceResolver.adaptTo(PageManager.class);
+			if (pageManager != null) {
+				return pageManager.getContainingPage(resource);
+			}
+		}
+
+		return null;
+	}
+
+
+	private static boolean isDAMAsset(String path) {
+
+		return path.startsWith("/content/dam");
+	}
+	
+	private static String getAssetFileName(Resource assetResource) {
+
+		String assetPath;
+		String assetName = StringUtils.EMPTY;
+		if(assetResource != null) {
+			assetPath = assetResource.getPath();
+			String fileExtension = FilenameUtils.getExtension(assetPath);
+			Asset asset = assetResource.adaptTo(Asset.class);
+			String assetTitle = asset.getMetadataValue("dc:title");
+
+			if(StringUtils.isNotBlank(assetTitle)) {
+				assetName = assetTitle.trim();
+				
+			} else {
+				assetName = assetResource.getName();
+			}
+		}
+
+		return assetName;
+	}
+}
