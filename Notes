@@ -86,3 +86,35 @@ fulltext=Trustee and fund documents
 p.limit=-1
 orderby=@jcr:content/cq:lastModified
 orderby.sort=desc
+.............................................
+group.p.or=true
+
+# Group 1: /content/cfs-winged/au/en/adviser/firsttech
+group.1_group.path=/content/cfs-winged/au/en/adviser/firsttech
+group.1_group.path.self=true
+group.1_group.type=cq:Page
+group.1_group.1_property=@jcr:content/hideInNav
+group.1_group.1_property.operation=not
+group.1_group.1_property.value=exists
+
+# Group 2: /content/dam/colonial-first-state/docs/adviser/firsttech
+group.2_group.path=/content/dam/colonial-first-state/docs/adviser/firsttech
+group.2_group.path.self=true
+group.2_group.1_property=@jcr:content/hideInNav
+group.2_group.1_property.operation=not
+group.2_group.1_property.value=exists
+
+# Group 3: /content/cfs-winged/au/en/about-us
+group.3_group.path=/content/cfs-winged/au/en/about-us
+group.3_group.path.self=true
+group.3_group.type=cq:Page
+group.3_group.1_property=@jcr:content/hideInNav
+group.3_group.1_property.operation=not
+group.3_group.1_property.value=exists
+
+fulltext=Trustee and fund documents
+orderby=@jcr:content/cq:lastModified
+orderby.sort=desc
+p.limit=12
+p.offset=0
+
